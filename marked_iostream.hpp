@@ -3,6 +3,7 @@
 #ifndef _MARKED_STREAMBUF_H_
 #define _MARKED_STREAMBUF_H_
 
+#include <cstdio>
 #include <streambuf>
 #include <iostream>
 #include <string>
