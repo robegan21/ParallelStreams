@@ -1,11 +1,12 @@
 // Buffer.h
 
-#ifndef _Buffer_hpp
-#define _Buffer_hpp
+#ifndef _BUFFER_HPP
+#define _BUFFER_HPP
 
-#include <assert.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cassert>
+#include <cstdlib>
+#include <cstring>
+#include <sstream>
 
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/condition_variable.hpp>
@@ -42,7 +43,7 @@ public:
 
 	// alter capacity.  Can only decrease down to size()
 	void resize(Size newsize) {
-		assert( validate() );
+		assert( _capacity == 0 || validate() );
 		if (newsize == _capacity)
 			return;
 		Size glen = _gptr - _buf;
@@ -192,6 +193,12 @@ public:
 		std::swap(_capacity, rhs._capacity);
 	}
 
+	std::string getState() const {
+		std::stringstream ss;
+		ss << this << " get: " << (_gptr - _buf) << ", put: " << (_pptr - _buf) << ", mark: " << _mark << ", cap: " << _capacity;
+		return ss.str();
+	}
+
 protected:
 	// release memory
 	void reset() {
@@ -293,6 +300,7 @@ public:
 	}
 	
 	void push(BufferPtr &p) {
+		//std::cerr << this << "-BufferFifo::push(" << &p << "): " << p->getState() << std::endl;
 		while(!_queue->push(p));
 		_pushCond.notify_one();
 		p = NULL;
@@ -302,6 +310,7 @@ public:
 		if (ret) {
 			_popCond.notify_one();
 		}
+		//std::cerr << this << "-BufferFifo::pop(" << &p << "): " << ret << std::endl;
 		return ret;
 	}
 	bool empty() {
@@ -358,4 +367,4 @@ private:
 };
 
 
-#endif // _Buffer_hpp
+#endif // _BUFFER_HPP

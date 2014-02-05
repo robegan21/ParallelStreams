@@ -1,12 +1,12 @@
 // marked_iostream.hpp
 
-#ifndef _MARKED_STREAMBUF_H_
-#define _MARKED_STREAMBUF_H_
+#ifndef _MARKED_IOSTREAM_H_
+#define _MARKED_IOSTREAM_H_
 
 #include <cstdio>
 #include <streambuf>
 #include <iostream>
-#include <string>
+#include <cstring>
 
 #include "Buffer.hpp"
 
@@ -89,6 +89,8 @@ protected:
 	int sync() {
 		if (_writeOnly) 
 			setMark(true);
+		if (_readOnly && _buf->gremainder() == 0)
+			underflow();
 		return 0;
 	};
 
@@ -102,8 +104,8 @@ protected:
 		return _buf->read(s, n);
 	}
 	int underflow() {
-		assert(_readOnly);
-		assert(_buf->gremainder() == 0);
+		setReadOnly();
+		//assert(_buf->gremainder() == 0);
 		// get a new _buf from the fifo stream
 		BufferPtr next = NULL;
 		// get a new _buf from the fifo stream
@@ -127,7 +129,7 @@ protected:
 	}
 
 	int overflow (int c = EOF) {
-		assert(_writeOnly);
+		setWriteOnly();
 		// get a new Buffer from the pool
 		BufferPtr next = _bufFifo->getBufferPool().getBuffer();
 
@@ -202,4 +204,4 @@ public:
 };
 
 
-#endif
+#endif // _MARKED_IOSTREAM_H_
