@@ -199,6 +199,14 @@ public:
 		return ss.str();
 	}
 
+	Size getGetBufferUsed() const {
+		return (_pptr - _gptr);
+	}
+
+	Size getPutBufferUsed() const {
+		return (_pptr - _buf);
+	}
+
 protected:
 	// release memory
 	void reset() {
@@ -213,7 +221,7 @@ protected:
 		return ((_buf != NULL) & (_capacity >= _mark) & (_capacity >= s) & (s >= 0) & (_mark >= 0));
 	}
 	bool gvalidate() const {
-		return (_gptr - _buf >= 0 && _gptr - _buf <= _capacity && gend() - _gptr >= 0);
+		return (_gptr - _buf >= 0 && _gptr - _buf <= _capacity && _pptr - _gptr >= 0);
 	}
 	bool pvalidate() const {
 		return (_pptr - _buf >= 0 && _pptr - _buf <= _capacity);
@@ -294,7 +302,8 @@ public:
 	typedef boost::lockfree::queue< BufferPtr > Queue;
 	typedef boost::shared_ptr< Queue > QueuePtr;
 	BufferFifo(int numBuffers = 16, Size bufferSize = Buffer::DefaultSize, int poolMultiplier = 3) 
-		: _queue(new Queue(numBuffers) ), _pool(numBuffers*poolMultiplier, bufferSize), _readCount(0), _writeCount(0) {}
+		: _queue(new Queue(numBuffers) ), _pool(numBuffers*poolMultiplier, bufferSize),
+		  _totalReaders(0), _closedReaders(0), _totalWriters(0), _closedWriters(0), _isEOF(false) {}
 	~BufferFifo() {
 		clear();
 	}
@@ -316,6 +325,21 @@ public:
 	bool empty() {
 		return _queue->empty();
 	}
+	bool isEOF() const {
+		return _isEOF;
+	}
+	void setEOF() {
+		if (_isEOF) {
+			std::cerr << "WARNING: you should only setEOF once per program not per thread" << std::endl;
+		}
+		_isEOF = true;
+		int count = getActiveWriterCount();
+		if (count != 0) {
+			std::cerr << "WARNING: there are still active writers (" << count << ") when setEOF() was called... Chaos shall follow" << std::endl;
+		}
+		_pushCond.notify_all();
+
+	}
 
 	BufferPool &getBufferPool() { return _pool; }
 
@@ -336,22 +360,37 @@ public:
 		return _popCond;
 	}
 	int registerReader() {
-		return ++_readCount;
+		return ++_closedReaders;
 	}
 	int deregisterReader() {
-		return --_readCount;
+		return ++_totalReaders;
 	}
 	int registerWriter() {
-		return ++_writeCount;
+		return ++_totalWriters;
 	}
 	int deregisterWriter() {
-		return --_writeCount;
+		return ++_closedWriters;
+	}
+	int getWriterCount() const {
+		return _totalWriters.load();
+	}
+	int getActiveWriterCount() const {
+		return _totalWriters.load() - _closedWriters.load();
+	}
+	int getReaderCount() const {
+		return _totalReaders.load();
+	}
+	int getActiveReaderCount() const {
+		return _totalReaders.load() - _closedReaders.load();
 	}
 
 protected:
 	void clear() {
 		BufferPtr p = NULL;
 		while (_queue->pop(p)) {
+			if (p != NULL) {
+				std::cerr << "BufferFifo purging queue member: " << p << std::endl;
+			}
 			delete p;
 			p = NULL;
 		}
@@ -360,10 +399,10 @@ protected:
 private:
 	QueuePtr _queue;
 	BufferPool _pool;
+	boost::atomic<int> _totalReaders, _closedReaders, _totalWriters, _closedWriters;
 	boost::mutex _pushMutex, _popMutex;
 	boost::condition_variable _pushCond, _popCond;
-	boost::atomic<int> _readCount, _writeCount;
-
+	bool _isEOF;
 };
 
 

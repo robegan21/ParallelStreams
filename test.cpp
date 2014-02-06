@@ -1,5 +1,5 @@
 // module load boost/1.53.0
-// g++ -Wall -g -fopenmp -I $BOOST_DIR/include -L $BOOST_DIR/lib test.cpp -lboost_system
+// g++ -Wall -g -fopenmp -I $BOOST_DIR/include -L $BOOST_DIR/lib test.cpp -lboost_system -lboost_thread
 
 
 #include "Buffer.hpp"
@@ -122,13 +122,15 @@ public:
 		for(int32_t i = 0; i < metaData.getBytes(); i++) {
 			valid |= ((int) data[i]) == metaData.blockId;
 		}
+		//std::cout << "Message " << metaData.getBytes() << " from " << metaData.blockId << std::endl;
 		return valid;
 	}
 };
 
 int main(int argc, char *argv[]) {
+	{
 	BufferFifo bfifo;
-	int num = 2;
+	int num = 13;
 
 	vector< marked_istream_ptr > is(num, marked_istream_ptr());
 	vector< marked_ostream_ptr > os(num, marked_ostream_ptr());
@@ -139,52 +141,64 @@ int main(int argc, char *argv[]) {
 		os[i].reset( new marked_ostream(bfifo) );
 	}
 	int burstMean = 500, burstStd = 100, waitMicroMean = 2000, waitMicroStd = 20000;
-	int cycles = 50000;
-	int writers;
+	int cycles = 50;
+	int inMessages = 0, outMessages = 0;
+	int activeWriters, readers, writers;
 
 	// test many outputs, one input
 #pragma omp parallel
 	{
 		int threadId = omp_get_thread_num();
 		int numThreads = omp_get_num_threads();
-#pragma omp single
-		writers = numThreads-1;
+		readers = 1;
+		writers = numThreads-readers;
+		activeWriters = writers;
+
+#pragma omp barrier
+
 		boost::random::mt19937 rng; rng.seed( threadId * threadId * threadId * threadId );
 		boost::random::normal_distribution<> burst_bytes(burstMean, burstStd), wait_us(waitMicroMean, waitMicroStd);
 
 		std::cout << "Starting thread " << threadId << std::endl;
-		if (threadId == 0) {
+		if (threadId < readers) {
 			MessageTest msg;
 			// scan through all os until no more writers
 			bool lastpass = false;
-			while(writers > 0 && !lastpass) {
-				if (writers == 0)
+			while(!lastpass) {
+				if (bfifo.isEOF())
 					lastpass = true;
 				for(int i = 0; i < num ; i++) {
-					int messages = 0;
+					if ((i % readers) != threadId)
+						continue;
+					int messages = 0, totalBytes;
 					//if (!is[i]->good()) {
 						//std::cerr << "is " << i << " is not good!" << std::endl;
 						//lastpass = true;
 					//}
-					while (is[i]->peek() != EOF) {
+					while (is[i]->isReady()) {
 						msg.read(*is[i]);
-						std::cerr << "read " << msg.getBytes() << " bytes " << " from " << msg.getMetaData().blockId << std::endl;
+						totalBytes += msg.getBytes();
 						assert(msg.validate());
 						messages++;
 					}
 					if (messages == 0) {
 						is[i]->sync();
 					}
+#pragma omp atomic
+					inMessages += messages;
+					std::cerr << threadId << ": read " << messages << " messages " << totalBytes << " bytes." << std::endl;
+
 					//std::cerr << "writers: " << writers << std::endl;
 				}
 			}
-			std::cout << "Thread 0 finished" << std::endl;
+			std::cout << "Thread 0 finished: " << inMessages << std::endl;
 		} else {
+
 
 			MessageTest msg;
 			for(int j = 0; j < cycles ; j++) {
 				for(int i = 0; i < num; i++) {
-					if (i % (writers) != threadId - 1)
+					if ((i % writers) + readers != threadId)
 						continue;
 					//if (!os[i]->good()) {
 					//	std::cerr << "os " << i << " is not good!" << std::endl;
@@ -195,20 +209,32 @@ int main(int argc, char *argv[]) {
 					assert(msg.validate());
 					msg.write(*os[i]);
 					os[i]->setMark();
+#pragma omp atomic
+					outMessages++;
 					//std::cerr << "Thread " << threadId << " wrote " << bytes << " to " << i << ". " << os[i]->tellp() << std::endl;
 				}
 			}
 
 			// Finish up.
 			for(int i = 0; i < num; i++) {
-				if (i % (writers) != threadId - 1)
+				if ((i % writers) + readers != threadId)
 					continue;
 				os[i]->flush();
+				os[i].reset();
 			}
-#pragma omp atomic
-			writers--;
+
 			std::cout << "Thread " << threadId << " finished." << std::endl;
+
+#pragma omp critical
+			{
+				// only the last one should setEOF
+				if (--activeWriters == 0 && bfifo.getActiveWriterCount() == 0) {
+					bfifo.setEOF();
+					std::cerr << "Wrote " << outMessages << " messages" << std::endl;
+				}
+			}
 		}
+	}
 	}
 
 	return 0;

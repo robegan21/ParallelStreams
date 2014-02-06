@@ -8,6 +8,8 @@
 #include <iostream>
 #include <cstring>
 
+#include "boost/date_time/posix_time/posix_time_types.hpp"
+
 #include "Buffer.hpp"
 
 // each thread should create its own marked_fifo_streambuf (and associated iostreams)
@@ -28,11 +30,20 @@ public:
 	}
 	virtual ~marked_fifo_streambuf() {
 		sync();
-		_bufFifo->getBufferPool().putBuffer(_buf);
-		if (_readOnly)
+		if (_readOnly) {
 			_bufFifo->deregisterReader();
-		if (_writeOnly)
+			if (_buf->getGetBufferUsed()) {
+				std::cerr << "WARNING: getGetBufferUsed exists within ~marked_fifo_streambuf()" << std::endl;
+			}
+		}
+		if (_writeOnly) {
 			_bufFifo->deregisterWriter();
+			if (_buf->getPutBufferUsed()){
+				std::cerr << "WARNING: getPutBufferUsed exists within ~marked_fifo_streambuf()" << std::endl;
+			}
+		}
+		_bufFifo->getBufferPool().putBuffer(_buf);
+
 	}
 
 	int setMark(bool flush = false) {
@@ -42,6 +53,20 @@ public:
 			overflow(EOF);
 		}
 		return lastMarkSize;
+	}
+
+	bool isEOF() const {
+		return _bufFifo->isEOF();
+	}
+
+	BufferFifo &getBufferFifo() {
+		return *_bufFifo;
+	}
+
+protected:
+	// should not be called on streambuf directly...
+	void setEOF() {
+		_bufFifo->setEOF();
 	}
 
 protected:
@@ -105,7 +130,7 @@ protected:
 	}
 	int underflow() {
 		setReadOnly();
-		//assert(_buf->gremainder() == 0);
+		assert(_buf->gremainder() == 0);
 		// get a new _buf from the fifo stream
 		BufferPtr next = NULL;
 		// get a new _buf from the fifo stream
@@ -141,7 +166,9 @@ protected:
 		}
 
 		// push old to the fifo stream
+		assert(_buf != NULL);
 		_bufFifo->push(_buf);
+		assert(_buf == NULL);
 
 		// assign new buffer and optionally write the next char
 		_buf = next;
@@ -185,6 +212,28 @@ public:
 	marked_fifo_streambuf * rdbuf() {
 		return (marked_fifo_streambuf *) ((std::istream*) this)->rdbuf();
 	}
+
+	bool isReady(bool block = false) {
+		if (rdbuf()->in_avail() > 0)
+			return true;
+		else
+			sync();
+
+		if (block) {
+			BufferFifo &fifo = rdbuf()->getBufferFifo();
+			if (!fifo.isEOF() && rdbuf()->in_avail() == 0) {
+				boost::posix_time::time_duration waittime = boost::posix_time::millisec(50);
+				boost::unique_lock<boost::mutex> l( fifo.getPopMutex() );
+				while( !fifo.isEOF() && rdbuf()->in_avail() == 0 ) {
+					fifo.getPopCondition().timed_wait(l, waittime);
+					sync();
+				}
+			}
+		}
+		return rdbuf()->in_avail() > 0;
+	}
+
+
 };
 
 class marked_ostream : public std::ostream {
@@ -195,12 +244,13 @@ public:
 	virtual ~marked_ostream() {
 		delete rdbuf();
 	}
-	int setMark() {
-		return rdbuf()->setMark();
-	}
 	marked_fifo_streambuf * rdbuf() {
 		return (marked_fifo_streambuf *) ((std::istream*) this)->rdbuf();
 	}
+	int setMark() {
+		return rdbuf()->setMark();
+	}
+
 };
 
 
