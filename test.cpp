@@ -1,5 +1,5 @@
 // module load boost/1.53.0
-// g++ -Wall -g -gstabs -fopenmp -I $BOOST_DIR/include -L $BOOST_DIR/lib test.cpp -lboost_system -lboost_thread
+// g++ -Wall -g -fopenmp -I $BOOST_DIR/include -L $BOOST_DIR/lib test.cpp -lboost_system -lboost_thread
 
 
 #include "Buffer.hpp"
@@ -140,8 +140,7 @@ public:
 };
 
 int main(int argc, char *argv[]) {
-	{
-	BufferFifo bfifo;
+
 	int num = 127;
 
 	vector< marked_istream_ptr > is(num, marked_istream_ptr());
@@ -149,109 +148,128 @@ int main(int argc, char *argv[]) {
 
 	int burstMean = 500, burstStd = 100, waitMicroMean = 2000, waitMicroStd = 20000;
 	int cycles = 1000;
-	int inMessages = 0, outMessages = 0;
 	int activeWriters, readers, writers;
 
-	for (readers = 1 ; readers < omp_get_max_threads()-1; readers++) {
+	for (readers = 1 ; readers < omp_get_max_threads(); readers++) {
+		LOG("running with " << readers << " readers, " << omp_get_max_threads()-readers << " writers");
+
+		BufferFifo bfifo;
+		int inMessages = 0, outMessages = 0;
+
 #pragma omp parallel for
-	for(int i = 0; i < num ; i++) {
-		is[i].reset( new marked_istream(bfifo) );
-		os[i].reset( new marked_ostream(bfifo) );
-	}
+		for(int i = 0; i < num ; i++) {
+			is[i].reset( new marked_istream(bfifo) );
+			os[i].reset( new marked_ostream(bfifo) );
+		}
 
 		// test many outputs, one input
 #pragma omp parallel
-	{
-		int threadId = omp_get_thread_num();
-		int numThreads = omp_get_num_threads();
+		{
+			int threadId = omp_get_thread_num();
+			int numThreads = omp_get_num_threads();
 
-		writers = numThreads-readers;
-		activeWriters = writers;
+#pragma omp single
+			{
+				writers = numThreads-readers;
+				activeWriters = writers;
+			}
 
-#pragma omp barrier
+			boost::random::mt19937 rng; rng.seed( threadId * threadId * threadId * threadId );
+			boost::random::normal_distribution<> burst_bytes(burstMean, burstStd), wait_us(waitMicroMean, waitMicroStd);
 
-		boost::random::mt19937 rng; rng.seed( threadId * threadId * threadId * threadId );
-		boost::random::normal_distribution<> burst_bytes(burstMean, burstStd), wait_us(waitMicroMean, waitMicroStd);
+			int myMessages = 0;
 
-		//std::cout << "Starting thread " << threadId << std::endl;
-		if (threadId < readers) {
-			MessageTest msg;
-			// scan through all os until no more writers
-			bool lastpass = false;
-			while(!lastpass) {
-				if (bfifo.isEOF())
-					lastpass = true;
+			//std::cout << "Starting thread " << threadId << std::endl;
+			if (threadId < readers) {
+				MessageTest msg;
+				// scan through all os until no more writers
+				int lastpass = 1;
+				while(lastpass) {
+					if (bfifo.isEOF())
+						lastpass--;
+					for(int i = 0; i < num ; i++) {
+						if ((i % readers) != threadId)
+							continue;
+						int messages = 0, totalBytes = 0;
+						//if (!is[i]->good()) {
+						//std::cerr << "is " << i << " is not good!" << std::endl;
+						//lastpass = true;
+						//}
+						while (is[i]->isReady()) {
+							msg.read(*is[i]);
+							totalBytes += msg.getBytes();
+							assert(msg.validate());
+							messages++;
+						}
+						if (messages == 0) {
+							is[i]->sync();
+						}
+						myMessages += messages;
+						//std::cerr << threadId << ": read " << messages << " messages " << totalBytes << " bytes." << std::endl;
+
+						//std::cerr << "writers: " << writers << std::endl;
+					}
+				}
 				for(int i = 0; i < num ; i++) {
 					if ((i % readers) != threadId)
 						continue;
-					int messages = 0, totalBytes;
-					//if (!is[i]->good()) {
-						//std::cerr << "is " << i << " is not good!" << std::endl;
-						//lastpass = true;
-					//}
-					while (is[i]->isReady()) {
-						msg.read(*is[i]);
-						totalBytes += msg.getBytes();
-						assert(msg.validate());
-						messages++;
-					}
-					if (messages == 0) {
-						is[i]->sync();
-					}
-#pragma omp atomic
-					inMessages += messages;
-					//std::cerr << threadId << ": read " << messages << " messages " << totalBytes << " bytes." << std::endl;
-
-					//std::cerr << "writers: " << writers << std::endl;
+					is[i].reset();
 				}
-			}
-			LOG("Input Thread Finished");
-		} else {
 
+#pragma omp atomic
+				inMessages += myMessages;
 
-			MessageTest msg;
-			for(int j = 0; j < cycles ; j++) {
+				LOG("Input Thread Finished: " << myMessages << " messages");
+			} // reader
+			else { // writer
+
+				MessageTest msg;
+				for(int j = 0; j < cycles ; j++) {
+					for(int i = 0; i < num; i++) {
+						if ((i % writers) + readers != threadId)
+							continue;
+						//if (!os[i]->good()) {
+						//	std::cerr << "os " << i << " is not good!" << std::endl;
+						//	break;
+						//}
+						int blockBytes = burst_bytes(rng);
+						msg.setMessage(i, blockBytes);
+						assert(msg.validate());
+						//LOG("Writing " << i << " msg " << blockBytes << " to " << (long) os[i].get());
+						msg.write(*os[i]);
+						//LOG("Setting mark " << i << " msg " << blockBytes << " to " << (long) os[i].get());
+						os[i]->setMark();
+						myMessages++;
+						//std::cerr << "Thread " << threadId << " wrote " << bytes << " to " << i << ". " << os[i]->tellp() << std::endl;
+					}
+				}
+
+				// Finish up.
 				for(int i = 0; i < num; i++) {
 					if ((i % writers) + readers != threadId)
 						continue;
-					//if (!os[i]->good()) {
-					//	std::cerr << "os " << i << " is not good!" << std::endl;
-					//	break;
-					//}
-					int blockBytes = burst_bytes(rng);
-					msg.setMessage(i, blockBytes);
-					assert(msg.validate());
-					//LOG("Writing " << i << " msg " << blockBytes << " to " << (long) os[i].get());
-					msg.write(*os[i]);
-					//LOG("Setting mark " << i << " msg " << blockBytes << " to " << (long) os[i].get());
-					os[i]->setMark();
-#pragma omp atomic
-					outMessages++;
-					//std::cerr << "Thread " << threadId << " wrote " << bytes << " to " << i << ". " << os[i]->tellp() << std::endl;
+					os[i]->flush();
+					os[i].reset();
 				}
-			}
 
-			// Finish up.
-			for(int i = 0; i < num; i++) {
-				if ((i % writers) + readers != threadId)
-					continue;
-				os[i]->flush();
-				os[i].reset();
-			}
+#pragma omp atomic
+				outMessages += myMessages;
 
-			LOG(" Output Thread Finished");
+				LOG("Output Thread Finished: " << myMessages);
 
 #pragma omp critical
-			{
-				// only the last one should setEOF
-				if (--activeWriters == 0 && bfifo.getActiveWriterCount() == 0) {
-					bfifo.setEOF();
-					LOG("Wrote " << outMessages << " messages");
+				{
+					// only the last one should setEOF
+					if (--activeWriters == 0 && bfifo.getActiveWriterCount() == 0) {
+						bfifo.setEOF();
+					}
 				}
-			}
-		}
-	}}
-	}
+			} // writer
+		}  // parallel
+		LOG("Wrote " << outMessages << " Read " << inMessages);
+		assert(outMessages == inMessages);
+	} // number of readers
+
 
 	return 0;
 }

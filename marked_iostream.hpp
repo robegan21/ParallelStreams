@@ -168,8 +168,13 @@ protected:
 	streamsize xsputn (const char* s, streamsize n) {
 		setWriteOnly();
 		//LOG("marked_fifo_streambuf::xsputn(" << n << ")");
-		if (n > _buf->premainder() && _buf->getMark() > 0 && n <= _buf->capacity())
-			overflow(EOF);
+		if (n > _buf->premainder()) {
+			if (_buf->getMark() > 0 && n <= _buf->capacity()) {
+				overflow(EOF);
+			} else {
+				LOG("ERROR: message size is over buffer capacity(" << _buf->capacity() << "): " << n);
+			}
+		}
 		return _buf->write(s, n);
 	}
 	streamsize sputn(const char* s, streamsize n) {

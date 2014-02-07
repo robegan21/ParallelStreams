@@ -323,30 +323,36 @@ public:
 	typedef boost::shared_ptr< Queue > QueuePtr;
 	BufferFifo(int numBuffers = 16, Size bufferSize = Buffer::DefaultSize, int poolMultiplier = 3) 
 		: _queue(new Queue(numBuffers) ), _pool(numBuffers*poolMultiplier, bufferSize),
-		  _totalReaders(0), _closedReaders(0), _totalWriters(0), _closedWriters(0), _isEOF(false) {}
+		  _totalReaders(0), _closedReaders(0), _totalWriters(0), _closedWriters(0),
+		  _pushed(0), _popped(0), _isEOF(false) {}
 	~BufferFifo() {
 		clear();
 	}
 	
 	void push(BufferPtr &p) {
 		//std::cerr << this << "-BufferFifo::push(" << &p << "): " << p->getState() << std::endl;
+		_pushed++;
 		while(!_queue->push(p));
 		_pushCond.notify_one();
 		p = NULL;
 	}
 	bool pop(BufferPtr &p) {
-		bool ret = _queue->pop(p);
+		bool ret = false;
+		while (!ret && !(_isEOF && empty())) {
+			ret = _queue->pop(p);
+		}
 		if (ret) {
 			_popCond.notify_one();
+			_popped++;
 		}
 		//std::cerr << this << "-BufferFifo::pop(" << &p << "): " << ret << std::endl;
 		return ret;
 	}
-	bool empty() {
-		return _queue->empty();
+	bool empty() const {
+		return _queue->empty() && _pushed == _popped;
 	}
 	bool isEOF() const {
-		return _isEOF;
+		return _isEOF && empty();
 	}
 	void setEOF() {
 		if (_isEOF) {
@@ -358,7 +364,6 @@ public:
 			std::cerr << "WARNING: there are still active writers (" << count << ") when setEOF() was called... Chaos shall follow" << std::endl;
 		}
 		_pushCond.notify_all();
-
 	}
 
 	BufferPool &getBufferPool() { return _pool; }
@@ -419,7 +424,7 @@ protected:
 private:
 	QueuePtr _queue;
 	BufferPool _pool;
-	boost::atomic<int> _totalReaders, _closedReaders, _totalWriters, _closedWriters;
+	boost::atomic<int> _totalReaders, _closedReaders, _totalWriters, _closedWriters, _pushed, _popped;
 	boost::mutex _pushMutex, _popMutex;
 	boost::condition_variable _pushCond, _popCond;
 	bool _isEOF;
