@@ -24,7 +24,7 @@ public:
 	typedef std::streampos streampos;
 
 	marked_fifo_streambuf(BufferFifo &bufFifo) 
-		: std::streambuf(), _bufFifo(&bufFifo), _readOnly(false), _writeOnly(false) {
+		: std::streambuf(), _bufFifo(&bufFifo), _buf(NULL), _prevBytes(0), _readOnly(false), _writeOnly(false) {
 		_buf = _bufFifo->getBufferPool().getBuffer();
 		setbuf(_buf->begin(), _buf->capacity());
 	}
@@ -105,13 +105,29 @@ protected:
 
 	// buffer mgmt virtuals
 	//using std::streambuf* setbuf (char* s, streamsize n);
+	std::streambuf* setbuf(char* s, std::streamsize n) {
+		//LOG("marked_fifo_streambuf::setbuf(," << n << ")");
+		return std::streambuf::setbuf(s, n);
+	}
 
 	//using streampos seekoff (streamoff off, ios_base::seekdir way,
         //           ios_base::openmode which = ios_base::in | ios_base::out);
-
+	std::streampos seekoff (std::streamoff off, std::ios_base::seekdir way, std::ios_base::openmode which = std::ios_base::in | std::ios_base::out) {
+		if (way == std::ios_base::cur && off == 0) {
+			if (!_readOnly && (which & std::ios_base::out) == std::ios_base::out)
+				return _prevBytes + _buf->size();
+			if (!_writeOnly && (which & std::ios_base::in) == std::ios_base::in)
+				return _prevBytes + _buf->greturned();
+		}
+		throw;
+	}
 	//using streampos seekpos (streampos sp, ios_base::openmode which = ios_base::in | ios_base::out);
+	std::streampos seekpos (std::streampos sp, std::ios_base::openmode which = std::ios_base::in | std::ios_base::out) {
+		throw;
+	}
 
 	int sync() {
+		//LOG("marked_fifo_streambuf::sync()");
 		if (_writeOnly) 
 			setMark(true);
 		if (_readOnly && _buf->gremainder() == 0)
@@ -136,6 +152,7 @@ protected:
 		// get a new _buf from the fifo stream
 		if (_bufFifo->pop(next)) {
 			// put _buf back in the pool
+			_prevBytes += _buf->size();
 			_bufFifo->getBufferPool().putBuffer(_buf);
 			_buf = next;
 		} // else keep this old, exhausted _buf active
@@ -150,13 +167,23 @@ protected:
 	// put virtuals
 	streamsize xsputn (const char* s, streamsize n) {
 		setWriteOnly();
+		//LOG("marked_fifo_streambuf::xsputn(" << n << ")");
+		if (n > _buf->premainder() && _buf->getMark() > 0 && n <= _buf->capacity())
+			overflow(EOF);
 		return _buf->write(s, n);
+	}
+	streamsize sputn(const char* s, streamsize n) {
+		return xsputn(s,n);
+	}
+	int sputc(char c) {
+		return xsputn(&c, 1);
 	}
 
 	int overflow (int c = EOF) {
 		setWriteOnly();
 		// get a new Buffer from the pool
 		BufferPtr next = _bufFifo->getBufferPool().getBuffer();
+		//LOG((long) this << "-overflow: " << _buf);
 
 		// check for trailing bytes after the mark & move to next buffer
 		int markRemainder = _buf->markRemainder();
@@ -165,6 +192,7 @@ protected:
 			_buf->clear(_buf->getMark());
 		}
 
+		_prevBytes += _buf->size();
 		// push old to the fifo stream
 		assert(_buf != NULL);
 		_bufFifo->push(_buf);
@@ -198,6 +226,7 @@ private:
 private:
 	BufferFifo *_bufFifo;
 	BufferPtr _buf;
+	int64_t _prevBytes;
 	mutable bool _readOnly, _writeOnly;
 };
 
@@ -247,8 +276,8 @@ public:
 	marked_fifo_streambuf * rdbuf() {
 		return (marked_fifo_streambuf *) ((std::istream*) this)->rdbuf();
 	}
-	int setMark() {
-		return rdbuf()->setMark();
+	int setMark(bool flush = false) {
+		return rdbuf()->setMark(flush);
 	}
 
 };

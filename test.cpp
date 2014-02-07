@@ -1,16 +1,11 @@
 // module load boost/1.53.0
-// g++ -Wall -g -fopenmp -I $BOOST_DIR/include -L $BOOST_DIR/lib test.cpp -lboost_system -lboost_thread
+// g++ -Wall -g -gstabs -fopenmp -I $BOOST_DIR/include -L $BOOST_DIR/lib test.cpp -lboost_system -lboost_thread
 
 
 #include "Buffer.hpp"
 #include "marked_iostream.hpp"
-#ifdef _OPENMP
-#include "omp.h"
-#else
-int omp_get_thread_num() { return 0; }
-int omp_get_num_threads() { return 1; }
-#endif
 
+#include "stdio.h"
 #include <vector>
 #include <boost/shared_ptr.hpp>
 #include <boost/random/mersenne_twister.hpp>
@@ -22,16 +17,22 @@ using namespace std;
 typedef boost::shared_ptr< marked_istream > marked_istream_ptr;
 typedef boost::shared_ptr< marked_ostream > marked_ostream_ptr;
 
+
 class BlockBytes {
 public:
 	int32_t blockBytes;
 	BlockBytes() : blockBytes(0) {}
 	std::istream& read(std::istream &is) {
+		assert(is.good());
 		is.read((char *) &blockBytes, sizeof(blockBytes));
+		assert(is.good());
 		return is;
 	}
 	std::ostream& write(std::ostream &os) const {
+		assert(os.good());
 		os.write((const char*) &blockBytes, sizeof(blockBytes));
+		//LOG("BlockBytes::write " << blockBytes << " os: " << (long) &os);
+		assert(os.good());
 		return os;
 	}
 	int32_t getBytes() const {
@@ -49,13 +50,18 @@ public:
 	int32_t blockId;
 	BlockId(): BlockBytes(), blockId(-1) {}
 	std::istream& read(std::istream &is) {
+		assert(is.good());
 		BlockBytes::read(is);
 		is.read((char *) &blockId, sizeof(blockId));
+		assert(is.good());
 		return is;
 	}
 	std::ostream& write(std::ostream &os) const {
+		assert(os.good());
 		BlockBytes::write(os);
 		os.write((const char*) &blockId, sizeof(blockId));
+		//LOG("BlockId::write " << blockId << " os: " << (long) &os);
+		assert(os.good());
 		return os;
 	}
 	void reset() {
@@ -78,14 +84,19 @@ public:
 		free(data);
 	}
 	std::istream& read(std::istream &is) {
+		assert(is.good());
 		metaData.read(is);
 		reserve(metaData.getBytes());
 		is.read(data, metaData.getBytes());
+		assert(is.good());
 		return is;
 	}
 	std::ostream& write(std::ostream &os) const {
+		assert(os.good());
 		metaData.write(os);
 		os.write(data, metaData.getBytes());
+		//LOG("Message::write " << metaData.getBytes() << " os: " << (long) &os);
+		assert(os.good());
 		return os;
 	}
 	void reserve(int32_t n) {
@@ -122,6 +133,7 @@ public:
 		for(int32_t i = 0; i < metaData.getBytes(); i++) {
 			valid |= ((int) data[i]) == metaData.blockId;
 		}
+		//printf("MessageTest::validate(): T%d Message from %d with %d bytes\n", omp_get_thread_num(), metaData.blockId, metaData.getBytes());
 		//std::cout << "Message " << metaData.getBytes() << " from " << metaData.blockId << std::endl;
 		return valid;
 	}
@@ -130,27 +142,29 @@ public:
 int main(int argc, char *argv[]) {
 	{
 	BufferFifo bfifo;
-	int num = 13;
+	int num = 127;
 
 	vector< marked_istream_ptr > is(num, marked_istream_ptr());
 	vector< marked_ostream_ptr > os(num, marked_ostream_ptr());
 
+	int burstMean = 500, burstStd = 100, waitMicroMean = 2000, waitMicroStd = 20000;
+	int cycles = 1000;
+	int inMessages = 0, outMessages = 0;
+	int activeWriters, readers, writers;
+
+	for (readers = 1 ; readers < omp_get_max_threads()-1; readers++) {
 #pragma omp parallel for
 	for(int i = 0; i < num ; i++) {
 		is[i].reset( new marked_istream(bfifo) );
 		os[i].reset( new marked_ostream(bfifo) );
 	}
-	int burstMean = 500, burstStd = 100, waitMicroMean = 2000, waitMicroStd = 20000;
-	int cycles = 50;
-	int inMessages = 0, outMessages = 0;
-	int activeWriters, readers, writers;
 
-	// test many outputs, one input
+		// test many outputs, one input
 #pragma omp parallel
 	{
 		int threadId = omp_get_thread_num();
 		int numThreads = omp_get_num_threads();
-		readers = 1;
+
 		writers = numThreads-readers;
 		activeWriters = writers;
 
@@ -159,7 +173,7 @@ int main(int argc, char *argv[]) {
 		boost::random::mt19937 rng; rng.seed( threadId * threadId * threadId * threadId );
 		boost::random::normal_distribution<> burst_bytes(burstMean, burstStd), wait_us(waitMicroMean, waitMicroStd);
 
-		std::cout << "Starting thread " << threadId << std::endl;
+		//std::cout << "Starting thread " << threadId << std::endl;
 		if (threadId < readers) {
 			MessageTest msg;
 			// scan through all os until no more writers
@@ -186,12 +200,12 @@ int main(int argc, char *argv[]) {
 					}
 #pragma omp atomic
 					inMessages += messages;
-					std::cerr << threadId << ": read " << messages << " messages " << totalBytes << " bytes." << std::endl;
+					//std::cerr << threadId << ": read " << messages << " messages " << totalBytes << " bytes." << std::endl;
 
 					//std::cerr << "writers: " << writers << std::endl;
 				}
 			}
-			std::cout << "Thread 0 finished: " << inMessages << std::endl;
+			LOG("Input Thread Finished");
 		} else {
 
 
@@ -207,7 +221,9 @@ int main(int argc, char *argv[]) {
 					int blockBytes = burst_bytes(rng);
 					msg.setMessage(i, blockBytes);
 					assert(msg.validate());
+					//LOG("Writing " << i << " msg " << blockBytes << " to " << (long) os[i].get());
 					msg.write(*os[i]);
+					//LOG("Setting mark " << i << " msg " << blockBytes << " to " << (long) os[i].get());
 					os[i]->setMark();
 #pragma omp atomic
 					outMessages++;
@@ -223,18 +239,18 @@ int main(int argc, char *argv[]) {
 				os[i].reset();
 			}
 
-			std::cout << "Thread " << threadId << " finished." << std::endl;
+			LOG(" Output Thread Finished");
 
 #pragma omp critical
 			{
 				// only the last one should setEOF
 				if (--activeWriters == 0 && bfifo.getActiveWriterCount() == 0) {
 					bfifo.setEOF();
-					std::cerr << "Wrote " << outMessages << " messages" << std::endl;
+					LOG("Wrote " << outMessages << " messages");
 				}
 			}
 		}
-	}
+	}}
 	}
 
 	return 0;

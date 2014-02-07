@@ -3,6 +3,13 @@
 #ifndef _BUFFER_HPP
 #define _BUFFER_HPP
 
+#ifdef _OPENMP
+#include "omp.h"
+#else
+int omp_get_thread_num() { return 0; }
+int omp_get_num_threads() { return 1; }
+#endif
+
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
@@ -13,6 +20,8 @@
 #include <boost/lockfree/queue.hpp>
 #include <boost/lockfree/stack.hpp>
 #include <boost/shared_ptr.hpp>
+
+#define LOG(msg) { std::stringstream s; s << "T" << omp_get_thread_num() << ": " << msg << std::endl; std::string str = s.str(); std::cerr << str; }
 
 class Buffer {
 public:
@@ -62,10 +71,12 @@ public:
 	Size write(const char *src, Size len) {
 		assert( validate() );
 		len = std::min(len, premainder());
+		//LOG( (long) this << "-write(" << len << "): remaining " << premainder() << " with " << (int) (_pptr - _buf) << " or " << size() << " mark " << _mark );
 		if (len > 0)
 			memcpy(_pptr, src, len);
 		_pptr += len;	
 		assert( validate() );
+		//LOG( (long) this << "-wrote: " << len << " " << getState() );
 		return len;
 	}
 
@@ -84,6 +95,8 @@ public:
 		assert( validate() );
 		Size oldMark = _mark;
 		_mark = size();
+		//LOG( (long) this << "-setMark: " << _mark << ": " << (int) (_pptr - _buf) << " old: " << oldMark );
+		assert(_mark >= oldMark);
 		return _mark - oldMark;
 	}
 
@@ -91,7 +104,6 @@ public:
 	Size getMark() const {
 		return _mark;
 	}
-
 	// the capacity of the buffer
 	Size capacity() const {
 		return _capacity;
@@ -109,7 +121,7 @@ public:
 	}
 
 	// iterator for data region ready for gets
-	charPtr gbegin() {
+	charPtr &gbegin() {
 		return _gptr;
 	}
 	const charPtr gbegin() const {
@@ -121,7 +133,7 @@ public:
 	}
 
 	// iterator for empty region ready for puts
-	charPtr pbegin() {
+	charPtr &pbegin() {
 		return _pptr;
 	}
 	const charPtr pbegin() const {
@@ -155,6 +167,10 @@ public:
 		return gend() - gbegin();
 	}
 
+	Size greturned() const {
+		return gbegin() - begin();
+	}
+
 	// bytes written
 	Size size() const {
 		return _buf == NULL ? 0 : _pptr - _buf;
@@ -163,6 +179,7 @@ public:
 	charPtr gbump(Size bytes) {
 		assert( validate() );
 		_gptr += bytes;
+		//LOG((long) this << " Buffer::gbump(" << bytes << "): size:" << size() << " remainder: " << gremainder());
 		if ( !gvalidate() )
 			throw;
 		return _gptr;
@@ -170,6 +187,7 @@ public:
 	charPtr pbump(Size bytes) {
 		assert( validate() );
 		_pptr += bytes;
+		//LOG((long) this << " Buffer::pbump(" << bytes << "): size:" << size() << " remainder: " << premainder());
 		if ( !pvalidate() )
 			throw;
 		return _pptr;
@@ -177,11 +195,13 @@ public:
 
 	void setg (char* gbeg, char* gnext, char* _gend) {
 		_gptr = gnext;
+		//LOG((long) this << " Buffer::setg(" << (long) gbeg << "): size:" << (long) gnext);
 		if (gbeg != _buf || (_gend != end() || _gend != gend()) || !gvalidate())
 			throw;
 	}
 	void setp (char* new_pbase, char* new_epptr) {
 		_pptr = _buf;
+		//LOG((long) this << " Buffer::setp(" << (long) new_pbase << "): size:" << (long) _buf);
 		if (new_pbase != _buf || new_epptr != end() || !pvalidate())
 			throw;
 	}
@@ -195,7 +215,7 @@ public:
 
 	std::string getState() const {
 		std::stringstream ss;
-		ss << this << " get: " << (_gptr - _buf) << ", put: " << (_pptr - _buf) << ", mark: " << _mark << ", cap: " << _capacity;
+		ss << "Buffer::getState(): " << (long) this << " get: " << (_gptr - _buf) << ", put: " << (_pptr - _buf) << ", mark: " << _mark << ", cap: " << _capacity;
 		return ss.str();
 	}
 
@@ -218,7 +238,7 @@ protected:
 	// sanity check for assertions
 	bool validate() const {
 		Size s = size();
-		return ((_buf != NULL) & (_capacity >= _mark) & (_capacity >= s) & (s >= 0) & (_mark >= 0));
+		return ((_buf != NULL) & (_capacity >= _mark) & (_capacity >= s) & (s >= 0) & (_mark >= 0) & (s >= _mark));
 	}
 	bool gvalidate() const {
 		return (_gptr - _buf >= 0 && _gptr - _buf <= _capacity && _pptr - _gptr >= 0);
