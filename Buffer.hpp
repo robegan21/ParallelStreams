@@ -61,6 +61,7 @@ public:
 			return;
 		}
 		_buf = (charPtr) realloc(_buf, newsize);
+		assert(_buf != NULL);
 		_gptr = _buf + glen;
 		_pptr = _buf + plen;
 		_capacity = newsize;
@@ -68,15 +69,17 @@ public:
 	}
 
 	// write up to capacity()
-	Size write(const char *src, Size len) {
+	Size write(const char *src, Size _len) {
 		assert( validate() );
-		len = std::min(len, premainder());
+		assert( _len > 0 );
 		//LOG( (long) this << "-write(" << len << "): remaining " << premainder() << " with " << (int) (_pptr - _buf) << " or " << size() << " mark " << _mark );
+		int len = std::min(_len, premainder());
 		if (len > 0)
 			memcpy(_pptr, src, len);
 		_pptr += len;	
 		assert( validate() );
 		//LOG( (long) this << "-wrote: " << len << " " << getState() );
+		assert(len == _len);
 		return len;
 	}
 
@@ -276,10 +279,13 @@ public:
 	BufferPtr getBuffer() {
 		BufferPtr p = NULL;
 		if (_stack->pop(p)) {
+			if ( p->capacity() < getBufferSize() ) {
+				p->resize( getBufferSize() );
+			}
 			return p;
 		} else {
 			_allocCount++;
-			return new Buffer(_bufferSize);
+			return new Buffer(getBufferSize());
 		}
 	}
 	bool putBuffer(BufferPtr &p) {
@@ -293,13 +299,23 @@ public:
 		}
 		return ret;
 	}
-	Size getBufferSize() const { return _bufferSize; }
+	Size getBufferSize() const { return _bufferSize.load(); }
+	void setBufferSize(Size newSize) { 
+		Size oldSize = _bufferSize.load();
+		while (newSize > oldSize && !_bufferSize.compare_exchange_weak(oldSize, newSize)) { 
+			oldSize = _bufferSize.load();
+		}
+	}
 	int64_t getAllocCount() const { return _allocCount; }
 	int64_t getDeallocCount() const { return _deallocCount; }
 
 	void swap(BufferPool &rhs) {
 		std::swap(_stack, rhs._stack );
-		std::swap(_bufferSize, rhs._bufferSize);
+
+		Size tmp2 = _bufferSize.load();
+		_bufferSize = rhs._bufferSize.load();
+		rhs._bufferSize.store(tmp2);
+
 		int64_t tmp = _allocCount.load();
 		_allocCount = rhs._allocCount.load();
 		rhs._allocCount.store( tmp );
@@ -311,7 +327,7 @@ public:
 
 private:
 	StackPtr _stack;
-	Size _bufferSize;
+	boost::atomic<Size> _bufferSize;
 	boost::atomic<int64_t> _allocCount, _deallocCount;
 };
 
@@ -330,7 +346,6 @@ public:
 	}
 	
 	void push(BufferPtr &p) {
-		//std::cerr << this << "-BufferFifo::push(" << &p << "): " << p->getState() << std::endl;
 		_pushed++;
 		while(!_queue->push(p));
 		_pushCond.notify_one();
@@ -345,7 +360,6 @@ public:
 			_popCond.notify_one();
 			_popped++;
 		}
-		//std::cerr << this << "-BufferFifo::pop(" << &p << "): " << ret << std::endl;
 		return ret;
 	}
 	bool empty() const {
@@ -356,12 +370,12 @@ public:
 	}
 	void setEOF() {
 		if (_isEOF) {
-			std::cerr << "WARNING: you should only setEOF once per program not per thread" << std::endl;
+			LOG("Warning: you should only setEOF once per program not per thread");
 		}
 		_isEOF = true;
 		int count = getActiveWriterCount();
 		if (count != 0) {
-			std::cerr << "WARNING: there are still active writers (" << count << ") when setEOF() was called... Chaos shall follow" << std::endl;
+			LOG("Warning: there are still active writers (" << count << ") when setEOF() was called... Chaos shall follow");
 		}
 		_pushCond.notify_all();
 	}
@@ -413,9 +427,7 @@ protected:
 	void clear() {
 		BufferPtr p = NULL;
 		while (_queue->pop(p)) {
-			if (p != NULL) {
-				std::cerr << "BufferFifo purging queue member: " << p << std::endl;
-			}
+			assert(p!=NULL);
 			delete p;
 			p = NULL;
 		}

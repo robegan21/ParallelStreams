@@ -33,13 +33,13 @@ public:
 		if (_readOnly) {
 			_bufFifo->deregisterReader();
 			if (_buf->getGetBufferUsed()) {
-				std::cerr << "WARNING: getGetBufferUsed exists within ~marked_fifo_streambuf()" << std::endl;
+				LOG("Warning: getGetBufferUsed exists within ~marked_fifo_streambuf()");
 			}
 		}
 		if (_writeOnly) {
 			_bufFifo->deregisterWriter();
 			if (_buf->getPutBufferUsed()){
-				std::cerr << "WARNING: getPutBufferUsed exists within ~marked_fifo_streambuf()" << std::endl;
+				LOG("Warning: getPutBufferUsed exists within ~marked_fifo_streambuf()");
 			}
 		}
 		_bufFifo->getBufferPool().putBuffer(_buf);
@@ -110,8 +110,6 @@ protected:
 		return std::streambuf::setbuf(s, n);
 	}
 
-	//using streampos seekoff (streamoff off, ios_base::seekdir way,
-        //           ios_base::openmode which = ios_base::in | ios_base::out);
 	std::streampos seekoff (std::streamoff off, std::ios_base::seekdir way, std::ios_base::openmode which = std::ios_base::in | std::ios_base::out) {
 		if (way == std::ios_base::cur && off == 0) {
 			if (!_readOnly && (which & std::ios_base::out) == std::ios_base::out)
@@ -119,11 +117,10 @@ protected:
 			if (!_writeOnly && (which & std::ios_base::in) == std::ios_base::in)
 				return _prevBytes + _buf->greturned();
 		}
-		throw;
+		return -1; // unsupported
 	}
-	//using streampos seekpos (streampos sp, ios_base::openmode which = ios_base::in | ios_base::out);
 	std::streampos seekpos (std::streampos sp, std::ios_base::openmode which = std::ios_base::in | std::ios_base::out) {
-		throw;
+		return -1; // unsupported
 	}
 
 	int sync() {
@@ -160,19 +157,26 @@ protected:
 			return EOF;
 		return *_buf->gbegin();
 	}
-
 	//using int uflow();
 	//using int pbackfail (int c = EOF);
 
 	// put virtuals
 	streamsize xsputn (const char* s, streamsize n) {
+		assert(n>0);
 		setWriteOnly();
 		//LOG("marked_fifo_streambuf::xsputn(" << n << ")");
 		if (n > _buf->premainder()) {
-			if (_buf->getMark() > 0 && n <= _buf->capacity()) {
+			if (_buf->getMark() > 0 && n < _buf->capacity()) {
+				// message will pass if buf is empty
 				overflow(EOF);
 			} else {
-				LOG("ERROR: message size is over buffer capacity(" << _buf->capacity() << "): " << n);
+				if (n > 1024*1024) {
+					LOG("Warning: message size is extremely large and over buffer capacity(" << _buf->capacity() << "): " << n);
+				}
+				if (n >= _bufFifo->getBufferPool().getBufferSize()) {
+					_bufFifo->getBufferPool().setBufferSize( 4 * n + 256);
+				}
+				overflow(EOF);
 			}
 		}
 		return _buf->write(s, n);

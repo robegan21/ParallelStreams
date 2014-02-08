@@ -11,6 +11,7 @@
 #include <boost/random/mersenne_twister.hpp>
 #include <boost/random/uniform_smallint.hpp>
 #include <boost/random/normal_distribution.hpp>
+#include <boost/date_time/posix_time/posix_time_types.hpp>
 
 using namespace std;
 
@@ -93,6 +94,7 @@ public:
 	}
 	std::ostream& write(std::ostream &os) const {
 		assert(os.good());
+		assert(metaData.getBytes() > 0);
 		metaData.write(os);
 		os.write(data, metaData.getBytes());
 		//LOG("Message::write " << metaData.getBytes() << " os: " << (long) &os);
@@ -101,6 +103,7 @@ public:
 	}
 	void reserve(int32_t n) {
 		data = (char*) realloc(data, n);
+		assert(data != NULL);
 	}
 	void setMessage(const char* src, int32_t n) {
 		reserve(n);
@@ -146,7 +149,7 @@ int main(int argc, char *argv[]) {
 	vector< marked_istream_ptr > is(num, marked_istream_ptr());
 	vector< marked_ostream_ptr > os(num, marked_ostream_ptr());
 
-	int burstMean = 500, burstStd = 100, waitMicroMean = 2000, waitMicroStd = 20000;
+	int burstMean = 1000, burstStd = 5000, waitMicroMean = 1, waitMicroStd = 10;
 	int cycles = 1000;
 	int activeWriters, readers, writers;
 
@@ -191,23 +194,18 @@ int main(int argc, char *argv[]) {
 						if ((i % readers) != threadId)
 							continue;
 						int messages = 0, totalBytes = 0;
-						//if (!is[i]->good()) {
-						//std::cerr << "is " << i << " is not good!" << std::endl;
-						//lastpass = true;
-						//}
+						assert(is[i]->good());
 						while (is[i]->isReady()) {
 							msg.read(*is[i]);
 							totalBytes += msg.getBytes();
 							assert(msg.validate());
 							messages++;
+							assert(is[i]->good());
 						}
 						if (messages == 0) {
 							is[i]->sync();
 						}
 						myMessages += messages;
-						//std::cerr << threadId << ": read " << messages << " messages " << totalBytes << " bytes." << std::endl;
-
-						//std::cerr << "writers: " << writers << std::endl;
 					}
 				}
 				for(int i = 0; i < num ; i++) {
@@ -228,19 +226,18 @@ int main(int argc, char *argv[]) {
 					for(int i = 0; i < num; i++) {
 						if ((i % writers) + readers != threadId)
 							continue;
-						//if (!os[i]->good()) {
-						//	std::cerr << "os " << i << " is not good!" << std::endl;
-						//	break;
-						//}
-						int blockBytes = burst_bytes(rng);
+						assert(os[i]->good());
+						int blockBytes;
+						while ((blockBytes = burst_bytes(rng)) <= 0);
 						msg.setMessage(i, blockBytes);
 						assert(msg.validate());
-						//LOG("Writing " << i << " msg " << blockBytes << " to " << (long) os[i].get());
 						msg.write(*os[i]);
-						//LOG("Setting mark " << i << " msg " << blockBytes << " to " << (long) os[i].get());
 						os[i]->setMark();
+						assert(os[i]->good());
 						myMessages++;
-						//std::cerr << "Thread " << threadId << " wrote " << bytes << " to " << i << ". " << os[i]->tellp() << std::endl;
+						long waittime;
+						while ((waittime = wait_us(rng)) <= 0);
+						boost::this_thread::sleep( boost::posix_time::microseconds( waittime ) );
 					}
 				}
 
