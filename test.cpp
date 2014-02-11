@@ -148,6 +148,7 @@ int main(int argc, char *argv[]) {
 
 	vector< marked_istream_ptr > is(num, marked_istream_ptr());
 	vector< marked_ostream_ptr > os(num, marked_ostream_ptr());
+	vector< float > mbps(omp_get_max_threads(), 0);
 
 	int cycles = 1000;
 	int burstMean = 32, burstStd;
@@ -186,6 +187,9 @@ int main(int argc, char *argv[]) {
 		{
 			int threadId = omp_get_thread_num();
 			int numThreads = omp_get_num_threads();
+			long myBytes = 0;
+			int myMessages = 0;
+			boost::system_time myStart = boost::get_system_time();
 
 #pragma omp single
 			{
@@ -195,8 +199,6 @@ int main(int argc, char *argv[]) {
 
 			boost::random::mt19937 rng; rng.seed( threadId * threadId * threadId * threadId );
 			boost::random::normal_distribution<> burst_bytes(burstMean, burstStd), wait_us(waitMicroMean, waitMicroStd);
-
-			int myMessages = 0;
 
 			//std::cout << "Starting thread " << threadId << std::endl;
 			if (threadId < readers) {
@@ -214,6 +216,7 @@ int main(int argc, char *argv[]) {
 						while (is[i]->isReady(0)) {
 							msg.read(*is[i]);
 							totalBytes += msg.getBytes();
+							myBytes += msg.getBytes();
 							assert(msg.validate());
 							messages++;
 							assert(is[i]->good());
@@ -251,6 +254,7 @@ int main(int argc, char *argv[]) {
 						os[i]->setMark();
 						assert(os[i]->good());
 						myMessages++;
+						myBytes += blockBytes;
 						long waittime;
 						while ((waittime = (waitMicroMean > 0 ? wait_us(rng) : 0)) < 0);
 						boost::this_thread::sleep( boost::posix_time::microseconds( waittime ) );
@@ -278,10 +282,18 @@ int main(int argc, char *argv[]) {
 					}
 				}
 			} // writer
+			boost::system_time myEnd = boost::get_system_time();
+			mbps[ threadId ] = (myBytes / 1000000.0) / ((myEnd - myStart).total_microseconds() / 1000000.0);
 		}  // parallel
 
 		boost::system_time end = boost::get_system_time();
-		LOG("Wrote " << outMessages << " Read " << inMessages << ". " << (end - start).total_milliseconds() << "ms");
+		std::stringstream ss;
+		for(int i = 0; i < (int) mbps.size(); i++)
+			ss << ", " << mbps[i];
+		std::string str = ss.str();
+
+		LOG("Wrote " << outMessages << " Read " << inMessages << ". " << (end - start).total_milliseconds() << "ms " << str);
+		LOG(bfifo.getState());
 		assert(outMessages == inMessages);
 	} // number of readers
 

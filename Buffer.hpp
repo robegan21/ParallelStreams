@@ -268,7 +268,7 @@ public:
 	typedef boost::lockfree::stack< BufferPtr > Stack;
 	typedef boost::shared_ptr< Stack > StackPtr;
 	BufferPool(int capacity = 8, Size bufferSize = Buffer::DefaultSize) 
-		: _stack(new Stack( capacity )), _bufferSize(bufferSize), _allocCount(0), _deallocCount(0) {}
+		: _stack(new Stack( capacity )), _bufferSize(bufferSize), _allocCount(0), _deallocCount(0), _stackDelay(0) {}
 	~BufferPool() {
 		clear();
 	}
@@ -292,12 +292,13 @@ public:
 		if (_stack->pop(p)) {
 			// got it
 		} else if (wait_us > 0) {
-			boost::system_time timeout = boost::get_system_time() + boost::posix_time::microseconds(wait_us);
+			boost::system_time start = boost::get_system_time();
 			boost::unique_lock< boost::mutex > l(_popMutex);
 			while(!_stack->pop(p)) {
-				if (!_pushCond.timed_wait(l, timeout))
+				if (!_pushCond.timed_wait(l, start + boost::posix_time::microseconds(wait_us) ))
 					break; // timeout was reached
 			}
+			_stackDelay += (boost::get_system_time() - start).total_microseconds();
 		}
 		if (p != NULL)
 			_popCond.notify_one();
@@ -315,12 +316,13 @@ public:
 
 		bool ret = _stack->bounded_push(p);
 		if (!ret && wait_us > 0) {
-			boost::system_time timeout = boost::get_system_time() + boost::posix_time::microseconds(wait_us);
+			boost::system_time start = boost::get_system_time();
 			boost::unique_lock< boost::mutex > l(_popMutex);
 			while ( !(ret = _stack->bounded_push(p)) ) {
-				if (!_popCond.timed_wait(l, timeout))
+				if (!_popCond.timed_wait(l, start + boost::posix_time::microseconds(wait_us) ))
 					break; // timeout was reached
 			}
+			_stackDelay += (boost::get_system_time() - start).total_microseconds();
 		}
 
 		if (!ret && allowGrowth) {
@@ -355,6 +357,10 @@ public:
 
 	int64_t getOutstanding() const { return _allocCount.load() - _deallocCount.load(); }
 
+	int64_t getStackDelay() const {
+		return _stackDelay.load();
+	}
+
 	void swap(BufferPool &rhs) {
 		std::swap(_stack, rhs._stack);
 
@@ -376,7 +382,7 @@ private:
 	boost::mutex _pushMutex, _popMutex;
 	boost::condition_variable _pushCond, _popCond;
 	boost::atomic<Size> _bufferSize;
-	boost::atomic<int64_t> _allocCount, _deallocCount;
+	boost::atomic<int64_t> _allocCount, _deallocCount, _stackDelay;
 };
 
 class BufferFifo {
@@ -388,7 +394,8 @@ public:
 	BufferFifo(int numBuffers = 8, Size bufferSize = Buffer::DefaultSize, int poolMultiplier = 16)
 		: _queue(new Queue(numBuffers) ), _pool(numBuffers*poolMultiplier, bufferSize),
 		  _totalReaders(0), _closedReaders(0), _totalWriters(0), _closedWriters(0),
-		  _pushed(0), _popped(0), _initialPoolCapacity(numBuffers*poolMultiplier), _initialBufferSize(bufferSize),
+		  _pushed(0), _popped(0), _pushedAttempts(0), _poppedAttempts(0), _queueDelay(0),
+		  _initialPoolCapacity(numBuffers*poolMultiplier), _initialBufferSize(bufferSize),
 		  _warningThreshold(4), _isEOF(false) {}
 	~BufferFifo() {
 		clear();
@@ -396,23 +403,34 @@ public:
 	
 	void push(BufferPtr &p) {
 		_pushed++;
+		int attempts = 0;
 		while(!_queue->push(p)) {
-			boost::this_thread::sleep(boost::posix_time::microseconds(10));
+			boost::system_time start = boost::get_system_time();
+			boost::this_thread::sleep(boost::posix_time::microseconds(100));
+			_queueDelay += ( boost::get_system_time() - start).total_microseconds();
+			attempts++;
 		}
 		_pushCond.notify_one();
+		_pushedAttempts += attempts;
 		p = NULL;
 	}
 	bool pop(BufferPtr &p) {
 		bool ret = false;
+		int attempts = 0;
 		while (!ret && !(_isEOF && empty())) {
 			ret = _queue->pop(p);
-			if (!ret)
-				boost::this_thread::sleep(boost::posix_time::microseconds(10));
+			attempts++;
+			if (!ret) {
+				boost::system_time start = boost::get_system_time();
+				boost::this_thread::sleep(boost::posix_time::microseconds(100));
+				_queueDelay += ( boost::get_system_time() - start).total_microseconds();
+			}
 		}
 		if (ret) {
 			_popCond.notify_one();
 			_popped++;
 		}
+		_poppedAttempts += attempts;
 		return ret;
 	}
 	bool empty() const {
@@ -448,7 +466,7 @@ public:
 				_warningThreshold *= 2;
 				LOG("Warning: BufferFifo pool capacity (" << _initialPoolCapacity << ") is being eclipsed by the outstanding buffers (" << outstanding << ").  Please consider increasing the initial poolCapacity");
 			}
-			wait_us = (100 * outstanding * outstanding * outstanding ) / ( capacity * capacity * capacity );
+			wait_us = (10 * outstanding * outstanding * outstanding ) / ( capacity * capacity * capacity );
 			//LOG("getWaitForBuffer(): " << wait_us << "us. outstandingBufferPool: " << outstanding << ", " << capacity << " pushed: " << _pushed.load() << " popped: " << _popped.load() << " inqueue: "<< (_pushed.load() - _popped.load()));
 		}
 		return wait_us;
@@ -515,6 +533,14 @@ public:
 	int getActiveReaderCount() const {
 		return _totalReaders.load() - _closedReaders.load();
 	}
+	std::string getState() const {
+		std::stringstream ss;
+		ss << "BufferFifo::getState(): pushed: " << _pushed.load() << "/" << _pushedAttempts.load();
+		ss << " popped: " << _popped.load() << "/" << _poppedAttempts.load() << " queueDelay: " << _queueDelay;
+		ss << " allocated: " << _pool.getAllocCount() << " deallocated: " << _pool.getDeallocCount() << " bufferDelay: " << _pool.getStackDelay();
+		ss << " isEOF: " << _isEOF;
+		return ss.str();
+	}
 
 protected:
 	void clear() {
@@ -529,7 +555,7 @@ protected:
 private:
 	QueuePtr _queue;
 	BufferPool _pool;
-	boost::atomic<int> _totalReaders, _closedReaders, _totalWriters, _closedWriters, _pushed, _popped;
+	boost::atomic<int64_t> _totalReaders, _closedReaders, _totalWriters, _closedWriters, _pushed, _popped, _pushedAttempts, _poppedAttempts, _queueDelay;
 	boost::mutex _pushMutex, _popMutex;
 	boost::condition_variable _pushCond, _popCond;
 	Size _initialPoolCapacity, _initialBufferSize, _warningThreshold;
