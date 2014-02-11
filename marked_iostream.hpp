@@ -25,7 +25,7 @@ public:
 
 	marked_fifo_streambuf(BufferFifo &bufFifo) 
 		: std::streambuf(), _bufFifo(&bufFifo), _buf(NULL), _prevBytes(0), _readOnly(false), _writeOnly(false) {
-		_buf = _bufFifo->getBufferPool().getBuffer();
+		_buf = _bufFifo->getBuffer();
 		setbuf(_buf->begin(), _buf->capacity());
 	}
 	virtual ~marked_fifo_streambuf() {
@@ -42,7 +42,7 @@ public:
 				LOG("Warning: getPutBufferUsed exists within ~marked_fifo_streambuf()");
 			}
 		}
-		_bufFifo->getBufferPool().putBuffer(_buf);
+		_bufFifo->putBuffer(_buf);
 
 	}
 
@@ -150,7 +150,7 @@ protected:
 		if (_bufFifo->pop(next)) {
 			// put _buf back in the pool
 			_prevBytes += _buf->size();
-			_bufFifo->getBufferPool().putBuffer(_buf);
+			_bufFifo->putBuffer(_buf);
 			_buf = next;
 		} // else keep this old, exhausted _buf active
 		if (_buf->gremainder() == 0)
@@ -170,13 +170,16 @@ protected:
 				// message will pass if buf is empty
 				overflow(EOF);
 			} else {
-				if (n > 1024*1024) {
-					LOG("Warning: message size is extremely large and over buffer capacity(" << _buf->capacity() << "): " << n);
+				// buffer is insufficient to hold this message
+				streamsize markRemainder = _buf->markRemainder();
+				if (n + markRemainder >= _bufFifo->getBufferSize()) {
+					_bufFifo->setBufferSize( 4 * (n+markRemainder) );
 				}
-				if (n >= _bufFifo->getBufferPool().getBufferSize()) {
-					_bufFifo->getBufferPool().setBufferSize( 4 * n + 256);
-				}
-				overflow(EOF);
+				if (_buf->getMark() > 0)
+					overflow(EOF);
+				else if (n > _buf->premainder() )
+					_buf->resize( _bufFifo->getBufferSize() );
+				assert(n < _buf->premainder());
 			}
 		}
 		return _buf->write(s, n);
@@ -191,7 +194,7 @@ protected:
 	int overflow (int c = EOF) {
 		setWriteOnly();
 		// get a new Buffer from the pool
-		BufferPtr next = _bufFifo->getBufferPool().getBuffer();
+		BufferPtr next = _bufFifo->getBuffer();
 		//LOG((long) this << "-overflow: " << _buf);
 
 		// check for trailing bytes after the mark & move to next buffer

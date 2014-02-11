@@ -149,12 +149,28 @@ int main(int argc, char *argv[]) {
 	vector< marked_istream_ptr > is(num, marked_istream_ptr());
 	vector< marked_ostream_ptr > os(num, marked_ostream_ptr());
 
-	int burstMean = 1000, burstStd = 5000, waitMicroMean = 1, waitMicroStd = 10;
 	int cycles = 1000;
+	int burstMean = 32, burstStd;
+	int waitMicroMean = 0, waitMicroStd;
+	if (argc >= 2) {
+		cycles = atoi(argv[1]);
+	}
+	if (argc >= 3) {
+		burstMean = atoi(argv[2]);
+	}
+	burstStd = burstMean * 2;
+	if (argc >= 4) {
+		waitMicroMean = atoi(argv[3]);
+	}
+	waitMicroStd = waitMicroMean * 2;
+
+	LOG("cycles: " << cycles << ", avgMessageBytes: " << burstMean << ", avgMessageDelay: " << waitMicroMean << " us");
+
 	int activeWriters, readers, writers;
 
 	for (readers = 1 ; readers < omp_get_max_threads(); readers++) {
-		LOG("running with " << readers << " readers, " << omp_get_max_threads()-readers << " writers");
+		LOG("Running with " << readers << " readers, " << omp_get_max_threads()-readers << " writers");
+		boost::system_time start = boost::get_system_time();
 
 		BufferFifo bfifo;
 		int inMessages = 0, outMessages = 0;
@@ -217,7 +233,7 @@ int main(int argc, char *argv[]) {
 #pragma omp atomic
 				inMessages += myMessages;
 
-				LOG("Input Thread Finished: " << myMessages << " messages");
+				//LOG("Input Thread Finished: " << myMessages << " messages");
 			} // reader
 			else { // writer
 
@@ -236,7 +252,7 @@ int main(int argc, char *argv[]) {
 						assert(os[i]->good());
 						myMessages++;
 						long waittime;
-						while ((waittime = wait_us(rng)) <= 0);
+						while ((waittime = (waitMicroMean > 0 ? wait_us(rng) : 0)) < 0);
 						boost::this_thread::sleep( boost::posix_time::microseconds( waittime ) );
 					}
 				}
@@ -252,7 +268,7 @@ int main(int argc, char *argv[]) {
 #pragma omp atomic
 				outMessages += myMessages;
 
-				LOG("Output Thread Finished: " << myMessages);
+				//LOG("Output Thread Finished: " << myMessages);
 
 #pragma omp critical
 				{
@@ -263,7 +279,9 @@ int main(int argc, char *argv[]) {
 				}
 			} // writer
 		}  // parallel
-		LOG("Wrote " << outMessages << " Read " << inMessages);
+
+		boost::system_time end = boost::get_system_time();
+		LOG("Wrote " << outMessages << " Read " << inMessages << ". " << (end - start).total_milliseconds() << "ms");
 		assert(outMessages == inMessages);
 	} // number of readers
 

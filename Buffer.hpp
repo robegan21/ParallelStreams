@@ -276,22 +276,62 @@ public:
 			_deallocCount++;
 		}
 	}
-	BufferPtr getBuffer() {
+
+	BufferPtr getNewBuffer() {
+		_allocCount++;
+		BufferPtr p = new Buffer(getBufferSize());
+		return p;
+	}
+
+	BufferPtr getBuffer(long wait_us = 0, bool allocNew = true) {
 		BufferPtr p = NULL;
 		if (_stack->pop(p)) {
-			if ( p->capacity() < getBufferSize() ) {
-				p->resize( getBufferSize() );
+			// got it
+		} else if (wait_us > 0) {
+			boost::system_time timeout = boost::get_system_time() + boost::posix_time::microseconds(wait_us);
+			boost::unique_lock< boost::mutex > l(_popMutex);
+			while(!_stack->pop(p)) {
+				if (!_pushCond.timed_wait(l, timeout))
+					break; // timeout was reached
 			}
-			return p;
-		} else {
-			_allocCount++;
-			return new Buffer(getBufferSize());
 		}
+		if (p != NULL)
+			_popCond.notify_one();
+		if (p == NULL && allocNew) {
+			p = getNewBuffer();
+		}
+		if (p != NULL && p->capacity() < getBufferSize() ) {
+			p->resize( getBufferSize() );
+		}
+		return p;
 	}
-	bool putBuffer(BufferPtr &p) {
+	bool putBuffer(BufferPtr &p, long wait_us = 0, bool allowGrowth = false) {
 		assert(p != NULL);
 		p->clear(); // only return clean buffers
+
 		bool ret = _stack->bounded_push(p);
+		if (!ret && wait_us > 0) {
+			boost::system_time timeout = boost::get_system_time() + boost::posix_time::microseconds(wait_us);
+			boost::unique_lock< boost::mutex > l(_popMutex);
+			while ( !(ret = _stack->bounded_push(p)) ) {
+				if (!_popCond.timed_wait(l, timeout))
+					break; // timeout was reached
+			}
+		}
+
+		if (!ret && allowGrowth) {
+			ret = _stack->push(p);
+//			int size = _stack->capacity;
+//			if (_deallocCount.load() > 2 * size) {
+//				// TODO mutex and protect against double increase / _deallocCount decrement
+//				_stack->reserve( 2 * size );
+//				_deallocCount -= 2*size;
+//			}
+//			ret = _stack->bounded_push(p);
+		}
+		if (ret)
+			_pushCond.notify_one();
+
 		if (!ret) {
 			delete p;
 			p = NULL;
@@ -309,8 +349,10 @@ public:
 	int64_t getAllocCount() const { return _allocCount; }
 	int64_t getDeallocCount() const { return _deallocCount; }
 
+	int64_t getOutstanding() const { return _allocCount.load() - _deallocCount.load(); }
+
 	void swap(BufferPool &rhs) {
-		std::swap(_stack, rhs._stack );
+		std::swap(_stack, rhs._stack);
 
 		Size tmp2 = _bufferSize.load();
 		_bufferSize = rhs._bufferSize.load();
@@ -327,6 +369,8 @@ public:
 
 private:
 	StackPtr _stack;
+	boost::mutex _pushMutex, _popMutex;
+	boost::condition_variable _pushCond, _popCond;
 	boost::atomic<Size> _bufferSize;
 	boost::atomic<int64_t> _allocCount, _deallocCount;
 };
@@ -337,10 +381,11 @@ public:
 	typedef Buffer* BufferPtr;
 	typedef boost::lockfree::queue< BufferPtr > Queue;
 	typedef boost::shared_ptr< Queue > QueuePtr;
-	BufferFifo(int numBuffers = 16, Size bufferSize = Buffer::DefaultSize, int poolMultiplier = 3) 
+	BufferFifo(int numBuffers = 8, Size bufferSize = Buffer::DefaultSize, int poolMultiplier = 16)
 		: _queue(new Queue(numBuffers) ), _pool(numBuffers*poolMultiplier, bufferSize),
 		  _totalReaders(0), _closedReaders(0), _totalWriters(0), _closedWriters(0),
-		  _pushed(0), _popped(0), _isEOF(false) {}
+		  _pushed(0), _popped(0), _initialPoolCapacity(numBuffers*poolMultiplier), _initialBufferSize(bufferSize),
+		  _warningThreshold(4), _isEOF(false) {}
 	~BufferFifo() {
 		clear();
 	}
@@ -381,6 +426,45 @@ public:
 	}
 
 	BufferPool &getBufferPool() { return _pool; }
+
+	Size getOutstanding() const {
+		Size poolOutstanding = _pool.getOutstanding();
+		return poolOutstanding - (_pushed.load() - _popped.load());
+	}
+
+	long getWaitForBuffer() {
+		long wait_us = 0;
+		double outstanding = getOutstanding(), capacity = _initialPoolCapacity;
+		if (outstanding > _initialPoolCapacity) {
+			if (outstanding > _warningThreshold * _initialPoolCapacity) {
+				_warningThreshold *= 2;
+				LOG("Warning: BufferFifo pool capacity (" << _initialPoolCapacity << ") is being eclipsed by the outstanding buffers (" << outstanding << ").  Please consider increasing the initial poolCapacity");
+			}
+			wait_us = (100 * outstanding * outstanding * outstanding ) / ( capacity * capacity * capacity );
+		}
+		return wait_us;
+	}
+
+	BufferPtr getBuffer() {
+		return _pool.getBuffer(getWaitForBuffer(), true);
+	}
+
+	bool putBuffer(BufferPtr &p) {
+		return _pool.putBuffer(p,  getWaitForBuffer(), true);
+	}
+
+	Size getBufferSize() {
+		return _pool.getBufferSize();
+	}
+
+	void setBufferSize(Size newsize) {
+		Size newSizeCeil = (newsize+63) & ~((Size)63);
+		if (newSizeCeil > 128 * _initialBufferSize) {
+			LOG("Warning: message size is extremely large and over the initial buffer capacity (" << _initialBufferSize << "): " << newSizeCeil << ".  Are you calling setMark() often?  Can you initialize BufferFifo with larger a larger BufferSize?");
+		}
+
+		_pool.setBufferSize(newSizeCeil);
+	}
 
 	void swap(BufferFifo &rhs) {
 		std::swap(_queue, rhs._queue);
@@ -439,6 +523,7 @@ private:
 	boost::atomic<int> _totalReaders, _closedReaders, _totalWriters, _closedWriters, _pushed, _popped;
 	boost::mutex _pushMutex, _popMutex;
 	boost::condition_variable _pushCond, _popCond;
+	Size _initialPoolCapacity, _initialBufferSize, _warningThreshold;
 	bool _isEOF;
 };
 
