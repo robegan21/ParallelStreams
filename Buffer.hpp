@@ -170,6 +170,10 @@ public:
 		return gend() - gbegin();
 	}
 
+	Size pbuffered() const {
+		return pbegin() - begin();
+	}
+
 	Size greturned() const {
 		return gbegin() - begin();
 	}
@@ -392,7 +396,9 @@ public:
 	
 	void push(BufferPtr &p) {
 		_pushed++;
-		while(!_queue->push(p));
+		while(!_queue->push(p)) {
+			boost::this_thread::sleep(boost::posix_time::microseconds(10));
+		}
 		_pushCond.notify_one();
 		p = NULL;
 	}
@@ -400,6 +406,8 @@ public:
 		bool ret = false;
 		while (!ret && !(_isEOF && empty())) {
 			ret = _queue->pop(p);
+			if (!ret)
+				boost::this_thread::sleep(boost::posix_time::microseconds(10));
 		}
 		if (ret) {
 			_popCond.notify_one();
@@ -429,18 +437,19 @@ public:
 
 	Size getOutstanding() const {
 		Size poolOutstanding = _pool.getOutstanding();
-		return poolOutstanding - (_pushed.load() - _popped.load());
+		return poolOutstanding;
 	}
 
 	long getWaitForBuffer() {
 		long wait_us = 0;
 		double outstanding = getOutstanding(), capacity = _initialPoolCapacity;
-		if (outstanding > _initialPoolCapacity) {
+		if (!_isEOF && outstanding > _initialPoolCapacity) {
 			if (outstanding > _warningThreshold * _initialPoolCapacity) {
 				_warningThreshold *= 2;
 				LOG("Warning: BufferFifo pool capacity (" << _initialPoolCapacity << ") is being eclipsed by the outstanding buffers (" << outstanding << ").  Please consider increasing the initial poolCapacity");
 			}
 			wait_us = (100 * outstanding * outstanding * outstanding ) / ( capacity * capacity * capacity );
+			//LOG("getWaitForBuffer(): " << wait_us << "us. outstandingBufferPool: " << outstanding << ", " << capacity << " pushed: " << _pushed.load() << " popped: " << _popped.load() << " inqueue: "<< (_pushed.load() - _popped.load()));
 		}
 		return wait_us;
 	}

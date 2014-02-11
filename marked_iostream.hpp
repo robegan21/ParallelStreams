@@ -125,7 +125,7 @@ protected:
 
 	int sync() {
 		//LOG("marked_fifo_streambuf::sync()");
-		if (_writeOnly) 
+		if (_writeOnly && _buf->pbuffered() > 0)
 			setMark(true);
 		if (_readOnly && _buf->gremainder() == 0)
 			underflow();
@@ -254,16 +254,16 @@ public:
 		return (marked_fifo_streambuf *) ((std::istream*) this)->rdbuf();
 	}
 
-	bool isReady(bool block = false) {
+	bool isReady(long blockMicroSeconds = 0) {
 		if (rdbuf()->in_avail() > 0)
 			return true;
 		else
 			sync();
 
-		if (block) {
+		if (blockMicroSeconds > 0) {
 			BufferFifo &fifo = rdbuf()->getBufferFifo();
 			if (!fifo.isEOF() && rdbuf()->in_avail() == 0) {
-				boost::posix_time::time_duration waittime = boost::posix_time::millisec(50);
+				boost::posix_time::time_duration waittime = boost::posix_time::microseconds(blockMicroSeconds);
 				boost::unique_lock<boost::mutex> l( fifo.getPopMutex() );
 				while( !fifo.isEOF() && rdbuf()->in_avail() == 0 ) {
 					fifo.getPopCondition().timed_wait(l, waittime);

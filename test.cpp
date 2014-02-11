@@ -211,7 +211,7 @@ int main(int argc, char *argv[]) {
 							continue;
 						int messages = 0, totalBytes = 0;
 						assert(is[i]->good());
-						while (is[i]->isReady()) {
+						while (is[i]->isReady(0)) {
 							msg.read(*is[i]);
 							totalBytes += msg.getBytes();
 							assert(msg.validate());
