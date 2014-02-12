@@ -15,6 +15,7 @@ int omp_get_num_threads() { return 1; }
 #include <cstring>
 #include <sstream>
 
+#include <boost/date_time/posix_time/posix_time_types.hpp>
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/condition_variable.hpp>
 #include <boost/lockfree/queue.hpp>
@@ -310,7 +311,7 @@ public:
 		}
 		return p;
 	}
-	bool putBuffer(BufferPtr &p, long wait_us = 0, bool allowGrowth = false) {
+	bool returnBuffer(BufferPtr &p, long wait_us = 0, bool allowGrowth = false) {
 		assert(p != NULL);
 		p->clear(); // only return clean buffers
 
@@ -327,13 +328,6 @@ public:
 
 		if (!ret && allowGrowth) {
 			ret = _stack->push(p);
-//			int size = _stack->capacity;
-//			if (_deallocCount.load() > 2 * size) {
-//				// TODO mutex and protect against double increase / _deallocCount decrement
-//				_stack->reserve( 2 * size );
-//				_deallocCount -= 2*size;
-//			}
-//			ret = _stack->bounded_push(p);
 		}
 		if (ret)
 			_pushCond.notify_one();
@@ -491,8 +485,8 @@ public:
 		return _pool.getBuffer(getWaitForBuffer(), true);
 	}
 
-	bool putBuffer(BufferPtr &p) {
-		return _pool.putBuffer(p,  getWaitForBuffer(), true);
+	bool returnBuffer(BufferPtr &p) {
+		return _pool.returnBuffer(p,  getWaitForBuffer(), true);
 	}
 
 	Size getBufferSize() {

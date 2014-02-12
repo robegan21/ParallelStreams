@@ -8,7 +8,9 @@
 #include <iostream>
 #include <cstring>
 
-#include "boost/date_time/posix_time/posix_time_types.hpp"
+#include <boost/thread/mutex.hpp>
+#include <boost/thread/condition_variable.hpp>
+#include <boost/date_time/posix_time/posix_time_types.hpp>
 
 #include "Buffer.hpp"
 
@@ -42,7 +44,7 @@ public:
 				LOG("Warning: getPutBufferUsed exists within ~marked_fifo_streambuf()");
 			}
 		}
-		_bufFifo->putBuffer(_buf);
+		_bufFifo->returnBuffer(_buf);
 
 	}
 
@@ -150,7 +152,7 @@ protected:
 		if (_bufFifo->pop(next)) {
 			// put _buf back in the pool
 			_prevBytes += _buf->size();
-			_bufFifo->putBuffer(_buf);
+			_bufFifo->returnBuffer(_buf);
 			_buf = next;
 		} // else keep this old, exhausted _buf active
 		if (_buf->gremainder() == 0)
