@@ -391,44 +391,59 @@ public:
 	typedef Buffer* BufferPtr;
 	typedef boost::lockfree::queue< BufferPtr > Queue;
 	typedef boost::shared_ptr< Queue > QueuePtr;
-	BufferFifo(int numBuffers = 8, Size bufferSize = Buffer::DefaultSize, int poolMultiplier = 16)
-		: _queue(new Queue(numBuffers) ), _pool(numBuffers*poolMultiplier, bufferSize),
+	BufferFifo(Size bufferSize = Buffer::DefaultSize, int numBuffers = 256)
+		: _queue(new Queue(numBuffers) ), _pool(numBuffers, bufferSize),
 		  _totalReaders(0), _closedReaders(0), _totalWriters(0), _closedWriters(0),
 		  _pushed(0), _popped(0), _pushedAttempts(0), _poppedAttempts(0), _queueDelay(0),
-		  _initialPoolCapacity(numBuffers*poolMultiplier), _initialBufferSize(bufferSize),
+		  _initialPoolCapacity(numBuffers), _initialBufferSize(bufferSize),
 		  _warningThreshold(4), _isEOF(false) {}
 	~BufferFifo() {
 		clear();
 	}
 	
-	void push(BufferPtr &p) {
+	void push(BufferPtr &p, long wait_us = 0) {
 		_pushed++;
-		int attempts = 0;
+		int attempts = 1;
+		boost::system_time start;
+		if (wait_us > 0)
+			start = boost::get_system_time();
 		while(!_queue->push(p)) {
-			boost::system_time start = boost::get_system_time();
-			boost::this_thread::sleep(boost::posix_time::microseconds(100));
-			_queueDelay += ( boost::get_system_time() - start).total_microseconds();
 			attempts++;
+			if (wait_us > 0) {
+				boost::system_time waitStart = boost::get_system_time();
+				boost::unique_lock<boost::mutex> l(_pushMutex);
+				_popCond.timed_wait(l, start + boost::posix_time::microseconds(wait_us));
+				_queueDelay += ( boost::get_system_time() - waitStart).total_microseconds();
+			}
 		}
 		_pushCond.notify_one();
 		_pushedAttempts += attempts;
 		p = NULL;
 	}
-	bool pop(BufferPtr &p) {
+	bool pop(BufferPtr &p, long wait_us = 1000) {
 		bool ret = false;
 		int attempts = 0;
+		boost::system_time start;
+		if (wait_us > 0)
+			start = boost::get_system_time();
 		while (!ret && !(_isEOF && empty())) {
-			ret = _queue->pop(p);
-			attempts++;
-			if (!ret) {
-				boost::system_time start = boost::get_system_time();
-				boost::this_thread::sleep(boost::posix_time::microseconds(100));
-				_queueDelay += ( boost::get_system_time() - start).total_microseconds();
+			// do not attempt a pop if there is nothing to pop
+			if (wait_us == 0 || _pushed > _popped) {
+				ret = _queue->pop(p);
+				attempts++;
+			}
+			if (wait_us > 0 && !ret) {
+				boost::system_time waitStart = boost::get_system_time();
+				boost::unique_lock<boost::mutex> l(_popMutex);
+				_pushCond.timed_wait(l, start + boost::posix_time::microseconds(wait_us));
+				_queueDelay += ( boost::get_system_time() - waitStart).total_microseconds();
+			} else {
+				break;
 			}
 		}
 		if (ret) {
-			_popCond.notify_one();
 			_popped++;
+			_popCond.notify_one();
 		}
 		_poppedAttempts += attempts;
 		return ret;

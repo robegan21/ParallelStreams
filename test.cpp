@@ -1,7 +1,6 @@
 // module load boost/1.53.0
 // g++ -Wall -g -fopenmp -I $BOOST_DIR/include -L $BOOST_DIR/lib test.cpp -lboost_system -lboost_thread
 
-
 #include "Buffer.hpp"
 #include "marked_iostream.hpp"
 
@@ -121,24 +120,54 @@ public:
 	}
 };
 
-class MessageTest : public BaseMessage<BlockId> {
+class MessageTest {
 public:
-	void setMessage(int32_t id, int32_t size) {
-		reserve(size);
-		char c = (char) id;
-		metaData.setBytes(size);
-		metaData.blockId = id;
-		for(int32_t i = 0; i < size; i++)
-			data[i] = c;
+	char *data;
+	MessageTest() : data(NULL) {
+		reset();
 	}
-	bool validate() const {
-		bool valid = true;
-		for(int32_t i = 0; i < metaData.getBytes(); i++) {
-			valid |= ((int) data[i]) == metaData.blockId;
+	~MessageTest() { free(data); }
+	void reset() {
+		reserve(sizeof(int32_t) * 2 + 8);
+		getBytes() = 0;
+		getId() = -1;
+	}
+	
+	static int32_t getMessageOverhead() {
+		return sizeof(int32_t) * 2;
+	}
+	int32_t &getBytes() {
+		return *((int32_t*) data);
+	}
+	int32_t &getId() {
+		return *(&getBytes() + 1);
+	}
+	char *getData() {
+		return (char*) (&getId() + 1);
+	}
+	
+	void reserve( int32_t size) {
+		data = (char*) realloc(data, getMessageOverhead() + size);
+	}
+	void setMessage(int32_t id, int32_t size) {
+		data = (char*) realloc(data, getMessageOverhead() + size);
+		char c = (char) id;
+		getBytes() = size;
+		getId()  = id; 	
+		char *d = getData();
+		for(int32_t i = 0; i < size; i++) {
+			d[i] = c;
 		}
-		//printf("MessageTest::validate(): T%d Message from %d with %d bytes\n", omp_get_thread_num(), metaData.blockId, metaData.getBytes());
-		//std::cout << "Message " << metaData.getBytes() << " from " << metaData.blockId << std::endl;
-		return valid;
+	}
+	std::istream& read(std::istream &is) {
+		is.read( (char*) data, getMessageOverhead() );
+		reserve( getBytes() );
+		is.read( getData(), getBytes());
+		return is;
+	}
+	std::ostream& write(std::ostream &os) {
+		os.write(data, getBytes() + getMessageOverhead());
+		return os;
 	}
 };
 
@@ -153,6 +182,7 @@ int main(int argc, char *argv[]) {
 	int cycles = 1000;
 	int burstMean = 32, burstStd;
 	int waitMicroMean = 0, waitMicroStd;
+	int bufferSize = 8192, numBuffers = 256;
 	if (argc >= 2) {
 		cycles = atoi(argv[1]);
 	}
@@ -164,8 +194,13 @@ int main(int argc, char *argv[]) {
 		waitMicroMean = atoi(argv[3]);
 	}
 	waitMicroStd = waitMicroMean * 2;
-
-	LOG("cycles: " << cycles << ", avgMessageBytes: " << burstMean << ", avgMessageDelay: " << waitMicroMean << " us");
+	if (argc >= 5) {
+		bufferSize = atoi(argv[4]);
+	}
+	if (argc >= 6) {
+		numBuffers = atoi(argv[5]);
+	}
+	LOG("cycles: " << cycles << ", avgMessageBytes: " << burstMean << ", avgMessageDelay: " << waitMicroMean << " us, bufferSize: " << bufferSize << ", numBuffers: " << numBuffers);
 
 	int activeWriters, readers, writers;
 
@@ -173,7 +208,7 @@ int main(int argc, char *argv[]) {
 		LOG("Running with " << readers << " readers, " << omp_get_max_threads()-readers << " writers");
 		boost::system_time start = boost::get_system_time();
 
-		BufferFifo bfifo;
+		BufferFifo bfifo(bufferSize, numBuffers);
 		int inMessages = 0, outMessages = 0;
 
 #pragma omp parallel for
@@ -189,16 +224,15 @@ int main(int argc, char *argv[]) {
 			int numThreads = omp_get_num_threads();
 			long myBytes = 0;
 			int myMessages = 0;
-			boost::system_time myStart = boost::get_system_time();
 
+			boost::random::mt19937 rng; rng.seed( threadId * threadId * threadId * threadId );
+			boost::random::normal_distribution<> burst_bytes(burstMean, burstStd), wait_us(waitMicroMean, waitMicroStd);
 #pragma omp single
 			{
 				writers = numThreads-readers;
 				activeWriters = writers;
 			}
-
-			boost::random::mt19937 rng; rng.seed( threadId * threadId * threadId * threadId );
-			boost::random::normal_distribution<> burst_bytes(burstMean, burstStd), wait_us(waitMicroMean, waitMicroStd);
+			boost::system_time myStart = boost::get_system_time();
 
 			//std::cout << "Starting thread " << threadId << std::endl;
 			if (threadId < readers) {
@@ -213,16 +247,13 @@ int main(int argc, char *argv[]) {
 							continue;
 						int messages = 0, totalBytes = 0;
 						assert(is[i]->good());
-						while (is[i]->isReady(0)) {
+						while (is[i]->isReady()) {
 							msg.read(*is[i]);
 							totalBytes += msg.getBytes();
 							myBytes += msg.getBytes();
 							assert(msg.validate());
 							messages++;
 							assert(is[i]->good());
-						}
-						if (messages == 0) {
-							is[i]->sync();
 						}
 						myMessages += messages;
 					}
