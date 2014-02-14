@@ -3,26 +3,20 @@
 #ifndef _BUFFER_HPP
 #define _BUFFER_HPP
 
-#ifdef _OPENMP
-#include "omp.h"
-#else
-int omp_get_thread_num() { return 0; }
-int omp_get_num_threads() { return 1; }
-#endif
-
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
 
 #include <boost/date_time/posix_time/posix_time_types.hpp>
+#include <boost/thread/thread.hpp>
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/condition_variable.hpp>
 #include <boost/lockfree/queue.hpp>
 #include <boost/lockfree/stack.hpp>
 #include <boost/shared_ptr.hpp>
 
-#define LOG(msg) { std::stringstream s; s << "T" << omp_get_thread_num() << ": " << msg << std::endl; std::string str = s.str(); std::cerr << str; }
+#define LOG(msg) { std::stringstream s; s << "T" << boost::this_thread::get_id() << ": " << msg << std::endl; std::string str = s.str(); std::cerr << str; }
 
 class Buffer {
 public:
@@ -399,14 +393,12 @@ public:
 		_pushed++;
 		int attempts = 1;
 		boost::system_time start;
-		if (wait_us > 0)
-			start = boost::get_system_time();
 		while(!_queue->push(p)) {
 			attempts++;
 			if (wait_us > 0) {
 				boost::system_time waitStart = boost::get_system_time();
 				boost::unique_lock<boost::mutex> l(_pushMutex);
-				_popCond.timed_wait(l, start + boost::posix_time::microseconds(wait_us));
+				_popCond.timed_wait(l, waitStart + boost::posix_time::microseconds(wait_us));
 				_queueDelay += ( boost::get_system_time() - waitStart).total_microseconds();
 			}
 		}
@@ -442,6 +434,12 @@ public:
 		_poppedAttempts += attempts;
 		return ret;
 	}
+    long getQueueSize() {
+        return _pushed.load() - _popped.load();
+    }
+    long getInitialPoolCapacity() {
+        return _initialPoolCapacity;
+    }
 	bool empty() const {
 		return _queue->empty() && _pushed == _popped;
 	}

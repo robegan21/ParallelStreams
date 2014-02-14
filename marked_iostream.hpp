@@ -8,6 +8,7 @@
 #include <iostream>
 #include <cstring>
 
+#include <boost/shared_ptr.hpp>
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/condition_variable.hpp>
 #include <boost/date_time/posix_time/posix_time_types.hpp>
@@ -295,6 +296,10 @@ public:
 	}
 
 };
+
+typedef boost::shared_ptr< marked_istream > marked_istream_ptr;
+typedef boost::shared_ptr< marked_ostream > marked_ostream_ptr;
+
 
 
 #endif // _MARKED_IOSTREAM_H_

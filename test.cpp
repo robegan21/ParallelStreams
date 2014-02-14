@@ -4,7 +4,14 @@
 #include "Buffer.hpp"
 #include "marked_iostream.hpp"
 
-#include "stdio.h"
+#ifdef _OPENMP
+#include "omp.h"
+#else
+int omp_get_thread_num() { return 0; }
+int omp_get_num_threads() { return 1; }
+#endif
+
+#include <stdio.h>
 #include <vector>
 #include <boost/shared_ptr.hpp>
 #include <boost/random/mersenne_twister.hpp>
@@ -13,9 +20,6 @@
 #include <boost/date_time/posix_time/posix_time_types.hpp>
 
 using namespace std;
-
-typedef boost::shared_ptr< marked_istream > marked_istream_ptr;
-typedef boost::shared_ptr< marked_ostream > marked_ostream_ptr;
 
 
 class BlockBytes {
